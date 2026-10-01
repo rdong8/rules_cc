@@ -17,6 +17,7 @@ load("//cc:action_names.bzl", "ACTION_NAMES")
 load("//cc:find_cc_toolchain.bzl", "CC_TOOLCHAIN_TYPE")
 load("//cc/common:feature_names.bzl", "feature_names")
 load("//cc/private:paths.bzl", "is_path_absolute")
+load("//cc/private:visibility.bzl", "PUBLIC_IF_NOT_GOOGLE")
 load("//cc/private/rules_impl:objc_common.bzl", "objc_common")
 load(":cc_common.bzl", "cc_common")
 load(
@@ -35,9 +36,8 @@ load(
     _should_stamp = "should_stamp",
 )
 load(":cc_info.bzl", "CcInfo")
-load(":visibility.bzl", "INTERNAL_VISIBILITY")
 
-visibility(INTERNAL_VISIBILITY)
+visibility(PUBLIC_IF_NOT_GOOGLE)
 
 linker_mode = struct(
     LINKING_DYNAMIC = "dynamic_linking_mode",
@@ -239,6 +239,21 @@ def _collect_library_hidden_top_level_artifacts(
                     artifacts_to_force_builder.append(dep[OutputGroupInfo]["_hidden_top_level_INTERNAL_"])
 
     return depset(transitive = artifacts_to_force_builder)
+
+def _create_dynamic_libraries_copy_actions(ctx, binary, dynamic_libraries_for_runtime):
+    result = []
+    for lib in depset(dynamic_libraries_for_runtime).to_list():
+        # If the binary and the DLL are not in the same directory, copy the DLL
+        # to the binary's directory.
+        if lib.dirname != binary.dirname:
+            copy = ctx.actions.declare_file(lib.basename, sibling = binary)
+            ctx.actions.symlink(output = copy, target_file = lib, progress_message = "Copying Execution Dynamic Library")
+            result.append(copy)
+        else:
+            # If the library is already in the same directory as the binary, we don't need to copy it,
+            # but we still add it to the result.
+            result.append(lib)
+    return depset(result)
 
 def _get_dynamic_libraries_for_runtime(cc_linking_context, linking_statically):
     libraries = []
@@ -1033,12 +1048,6 @@ def _defines(ctx, additional_make_variable_substitutions):
 def _local_defines(ctx, additional_make_variable_substitutions):
     return _defines_attribute(ctx, additional_make_variable_substitutions, "local_defines", getattr(ctx.attr, "additional_compiler_inputs", []))
 
-def _map_to_list(m):
-    result = []
-    for k, v in m.items():
-        result.append((k, v))
-    return result
-
 def _calculate_artifact_label_map(attr_list, attr_name):
     """
     Converts a label_list attribute into a list of (Artifact, Label) tuples.
@@ -1066,13 +1075,13 @@ def _get_srcs(ctx):
     if not hasattr(ctx.attr, "srcs"):
         return []
     artifact_label_map = _calculate_artifact_label_map(ctx.attr.srcs, "srcs")
-    return _map_to_list(artifact_label_map)
+    return artifact_label_map.items()
 
 def _get_cpp_module_interfaces(ctx):
     if not hasattr(ctx.attr, "module_interfaces"):
         return []
     artifact_label_map = _calculate_artifact_label_map(ctx.attr.module_interfaces, "module_interfaces")
-    return _map_to_list(artifact_label_map)
+    return artifact_label_map.items()
 
 # Returns a list of (Artifact, Label) tuples. Each tuple represents an input source
 # file and the label of the rule that generates it (or the label of the source file itself if it
@@ -1086,7 +1095,7 @@ def _get_private_hdrs(ctx):
             for artifact in src[DefaultInfo].files.to_list():
                 if "." + artifact.extension in extensions.CC_HEADER:
                     artifact_label_map[artifact] = src.label
-    return _map_to_list(artifact_label_map)
+    return artifact_label_map.items()
 
 # Returns the files from headers and does some checks.
 def _get_public_hdrs(ctx):
@@ -1099,7 +1108,7 @@ def _get_public_hdrs(ctx):
                 if _check_file_extension(artifact, extensions.DISALLOWED_HDRS_FILES, True):
                     continue
                 artifact_label_map[artifact] = hdr.label
-    return _map_to_list(artifact_label_map)
+    return artifact_label_map.items()
 
 def _linkopts(ctx, additional_make_variable_substitutions, cc_toolchain):
     linkopts = getattr(ctx.attr, "linkopts", [])
@@ -1226,6 +1235,7 @@ cc_helper = struct(
     get_coverage_environment = _get_coverage_environment,
     create_cc_instrumented_files_info = _create_cc_instrumented_files_info,
     get_dynamic_libraries_for_runtime = _get_dynamic_libraries_for_runtime,
+    create_dynamic_libraries_copy_actions = _create_dynamic_libraries_copy_actions,
     build_output_groups_for_emitting_compile_providers = _build_output_groups_for_emitting_compile_providers,
     merge_cc_debug_contexts = _merge_cc_debug_contexts,
     get_providers = _get_providers,
